@@ -15,7 +15,9 @@ from pathlib import Path
 import cv2
 import torch
 import torch.backends.cudnn as cudnn
-
+import math
+from optical_flow import dense_optical_flow
+import numpy as np
 
 
 palette = (2 ** 11 - 1, 2 ** 15 - 1, 2 ** 20 - 1)
@@ -62,7 +64,9 @@ def draw_boxes(img, bbox, identities=None, offset=(0, 0)):
 
 
 
-
+img_ls = []
+vector_qx = []
+vector_qy = []
 def detect(opt, save_img=False):
     out, source, weights, view_img, save_txt, imgsz = \
         opt.output, opt.source, opt.weights, opt.view_img, opt.save_txt, opt.img_size
@@ -105,7 +109,9 @@ def detect(opt, save_img=False):
 
     # Get names and colors
     names = model.module.names if hasattr(model, 'module') else model.names
-
+    rail_pts = np.array([[988, 357], [1107, 357], [1643, 1073], [577, 1073]], np.int32)
+    slope1 = (rail_pts[0][1]-rail_pts[-1][1])/(rail_pts[0][0]-rail_pts[-1][0])
+    slope2 = (rail_pts[2][1]-rail_pts[1][1])/(rail_pts[2][0]-rail_pts[1][0])
     # Run inference
     t0 = time.time()
     img = torch.zeros((1, 3, imgsz, imgsz), device=device)  # init img
@@ -114,7 +120,6 @@ def detect(opt, save_img=False):
 
     save_path = str(Path(out))
     txt_path = str(Path(out)) + '/results.txt'
-
     for frame_idx, (path, img, im0s, vid_cap) in enumerate(dataset):
         img = torch.from_numpy(img).to(device)
         img = img.half() if half else img.float()  # uint8 to fp16/32
@@ -137,6 +142,9 @@ def detect(opt, save_img=False):
                 p, s, im0 = path[i], '%g: ' % i, im0s[i].copy()
             else:
                 p, s, im0 = path, '', im0s
+            #im0 = cv2.resize(im0,dsize=(0,0),fx=0.5,fy=0.5,interpolation=cv2.INTER_AREA)
+            cv2.polylines(im0, [rail_pts], True, (255, 0, 255), 3)
+            img_ls.append(im0)
 
             s += '%gx%g ' % img.shape[2:]  # print string
             save_path = str(Path(out) / Path(p).name)
@@ -159,9 +167,79 @@ def detect(opt, save_img=False):
                 for *xyxy, conf, cls in det:
                     x_c, y_c, bbox_w, bbox_h = bbox_rel(*xyxy)
                     obj = [x_c, y_c, bbox_w, bbox_h]
+                    x1,y1,x2,y2 = int(xyxy[0]),int(xyxy[1]),int(xyxy[2]),int(xyxy[3])
                     bbox_xywh.append(obj)
                     confs.append([conf.item()])
                     annotation.append(names[int(c)])
+
+
+                    if len(bbox_xywh) == 1:
+                        if (x2 <= im0.shape[1] // 2):
+                            location = 'left'
+                        elif (x1 >= im0.shape[1] // 2):
+                            location = 'right'
+                        elif (x2 >= im0.shape[1] // 2 and x1 <= im0.shape[1] // 2):
+                            location = 'center'
+                    if (y2 <= -slope1*(x2 - rail_pts[0][0]) + rail_pts[0][1]) and location == 'left':
+                        cv2.putText(im0, 'Warning!', (130, 100), cv2.FONT_HERSHEY_COMPLEX, 1.0, (0, 0, 255), 3)
+                        break
+                    elif (y2 <= -slope2*(x1 - rail_pts[2][0])+rail_pts[2][1]) and location == 'right':
+                        cv2.putText(im0, 'Warning!', (130, 100), cv2.FONT_HERSHEY_COMPLEX, 1.0, (0, 0, 255), 3)
+                        break
+
+                    if len(img_ls) >= 2:  # changed 10 to 2 _hyeonuk
+                        before = img_ls[-2]
+                        cur = img_ls[-1]
+
+                        mo_x, mo_y = dense_optical_flow(xyxy, before, cur)
+
+                        if len(vector_qx) > 5:
+                            vector_qx.pop(0)
+                            vector_qy.pop(0)
+                            vector_qx.append(mo_x)
+                            vector_qy.append(mo_y)
+                            x_sum = sum(vector_qx)
+                            y_sum = sum(vector_qy)
+                            x_mean = x_sum  # / len(vector_qx)
+                            y_mean = y_sum  # / len(vector_qy)
+                        else:
+                            vector_qx.append(mo_x)
+                            vector_qy.append(mo_y)
+                            x_sum = sum(vector_qx)
+                            y_sum = sum(vector_qy)
+                            x_mean = x_sum  # / len(vector_qx)
+                            y_mean = y_sum  # / len(vector_qy)
+                            # 대표백터 magnitude angle로 변경 _hyeonuk
+                        mag = np.sqrt((math.pow(x_mean, 2)) + (math.pow(y_mean, 2)))  # 수정 예
+                        degree = np.angle(complex(x_mean,y_mean),deg=True)
+
+
+                        if location == -1:  # (x2<=im0.shape[1]//2): # left
+                            if (degree > 270) and (degree <= 315):  # magnitude 조건 추가 예정
+                                cv2.putText(im0, 'Warning!', (130, 100), cv2.FONT_HERSHEY_COMPLEX, 1.0, (0, 0, 255),
+                                            3)
+
+                            else:
+                                cv2.putText(im0, 'Safe!', (130, 100), cv2.FONT_HERSHEY_COMPLEX, 1.0, (255, 0, 0), 3)
+                        elif location == 1:  # (x1>=im0.shape[1]//2) : # right
+                            if (degree <= 270) and (degree > 225):
+                                cv2.putText(im0, 'Warning!', (130, 100), cv2.FONT_HERSHEY_COMPLEX, 1.0, (0, 0, 255),
+                                            3)
+
+
+                            else:
+                                cv2.putText(im0, 'Safe!', (130, 100), cv2.FONT_HERSHEY_COMPLEX, 1.0, (255, 0, 0), 3)
+                        elif location == 0:  # (x2 >= im0.shape[1]//2 and x1<=im0.shape[1]//2): # center
+                            if (np.mean([225, 270]) <= degree) and degree <= np.mean([270, 315]):
+                                cv2.putText(im0, 'Warning!', (130, 100), cv2.FONT_HERSHEY_COMPLEX, 1.0, (0, 0, 255),
+                                            3)
+
+                            else:
+                                cv2.putText(im0, 'Safe!', (130, 100), cv2.FONT_HERSHEY_COMPLEX, 1.0, (255, 0, 0), 3)
+                        center_x, center_y = (x1 + x2) // 2, (y1 + y2) // 2
+                        new_x = center_x + mag * np.cos(math.radians(degree))
+                        new_y = center_y + mag * np.sin(math.radians(degree))
+                        cv2.arrowedLine(im0, (int(center_x), int(center_y)), (int(new_x), int(new_y)), (0, 0, 255), 5)
 
                 xywhs = torch.Tensor(bbox_xywh)
                 confss = torch.Tensor(confs)
@@ -211,11 +289,13 @@ def detect(opt, save_img=False):
                         if isinstance(vid_writer, cv2.VideoWriter):
                             vid_writer.release()  # release previous video writer
 
+                        # im0 = cv2.resize(im0, dsize=(0, 0), fx=2, fy=2, interpolation=cv2.INTER_LINEAR)
                         fps = vid_cap.get(cv2.CAP_PROP_FPS)
                         w = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                         h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                         vid_writer = cv2.VideoWriter(
                             save_path, cv2.VideoWriter_fourcc(*opt.fourcc), fps, (w, h))
+
                     vid_writer.write(im0)
 
     if save_txt or save_img:
@@ -251,7 +331,7 @@ if __name__ == '__main__':
                         help='save results to *.txt')
     # class 0 is person , class 1 is car
     parser.add_argument('--classes', nargs='+', type=int,
-                        default=[0,1], help='filter by class')
+                        default=[0], help='filter by class')
     parser.add_argument('--agnostic-nms', action='store_true',
                         help='class-agnostic NMS')
     parser.add_argument('--augment', action='store_true',
