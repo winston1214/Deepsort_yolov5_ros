@@ -11,7 +11,7 @@ def optical_flow(x, before, img):  # Lucas Kanade
 
     lk_params = dict(winSize=(30, 30), maxLevel=100,
                      criteria=(cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 10, 0.05))
-    feature_params = dict(maxCorners=10000,
+    feature_params = dict(maxCorners=100,
                           qualityLevel=0.05,
                           minDistance=10,
                           blockSize=7)
@@ -48,14 +48,31 @@ def dense_optical_flow(x, before, img):
     hsv = np.zeros_like(before, dtype=np.float64)
     output = np.zeros_like(before, dtype=np.float64)
 
+
+
     prvs = cv2.cvtColor(before, cv2.COLOR_BGR2GRAY)
+    next_ = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    #grid, find Homography matrix, stabilize _hyeonuk
+    width, height = img.shape[:2]
+    step = 64
+    idx_y,idx_x = np.mgrid[height/4:3*height/4:step, width/4:3*width/4:step].astype(np.int)
+    indices = np.stack((idx_x,idx_y), axis = -1).reshape(-1,1,2)
+    prevPt = np.float32(indices)
+
+    nextPt, status, err = cv2.calcOpticalFlowPyrLK(prvs, next_, prevPt, None,
+                                                   criteria = (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 10, 0.05))
+    Hmatrix, tmp = cv2.findHomography(prevPt, nextPt, method = cv2.LMEDS)
+    stab_img =cv2.warpPerspective(prvs, Hmatrix, (width,height))
+
 
     hsv[..., 1], output[..., 1] = 255, 255
     # img = img[c1[1]:c2[1],c1[0]:c2[0]] # ROI만 계산
-    next_ = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    flow = cv2.calcOpticalFlowFarneback(prvs, next_, None, pyr_scale=0.5, levels=6, winsize=15, iterations=3, poly_n=5, \
-                                        poly_sigma=1.1,
-                                        flags=cv2.OPTFLOW_FARNEBACK_GAUSSIAN)
+
+    flow = cv2.calcOpticalFlowFarneback(stab_img, next_, None, pyr_scale=0.5, levels=6, winsize=15, iterations=3, poly_n=5, \
+                                        poly_sigma=1.1, flags=cv2.OPTFLOW_FARNEBACK_GAUSSIAN)
+    #prvs -> stab_img로 변환 _hyeonuk
+
     grid_x,grid_y = drawFlow(img,flow)
     motion = ego_motion(grid_x,grid_y,3)
     w,h = img.shape[:2]
