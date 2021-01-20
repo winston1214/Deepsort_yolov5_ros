@@ -190,6 +190,8 @@ def detect(opt, save_img=False):
                     if len(img_ls) >= 2:  # changed 10 to 2 _hyeonuk
                         before = img_ls[-2]
                         cur = img_ls[-1]
+                        if len(img_ls) >=3:
+                            img_ls.pop(0)
 
                         mo_x, mo_y = dense_optical_flow(xyxy, before, cur)
 
